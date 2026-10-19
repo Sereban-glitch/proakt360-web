@@ -1,0 +1,188 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// Настройки приложения (одна строка id=1): язык, имя мастера, пароль, сессии.
+model AppSettings {
+  id          Int    @id @default(1)
+  lang        String @default("ru") // ru | uk — язык интерфейса и документов по умолчанию
+  masterName  String @default("")
+  companyName String @default("")
+  passHash    String @default("") // sha256(salt + пароль); "" = вход без пароля (демо)
+  passSalt    String @default("")
+  sessions    Session[]
+}
+
+// Сессии мастера: случайный токен в HttpOnly cookie, срок 30 дней.
+model Session {
+  id        Int         @id @default(autoincrement())
+  token     String      @unique
+  appSettingsId Int
+  settings  AppSettings @relation(fields: [appSettingsId], references: [id], onDelete: Cascade)
+  createdAt DateTime    @default(now())
+  expiresAt DateTime
+}
+
+model BuildObject {
+  id          Int       @id @default(autoincrement())
+  name        String
+  customer    String
+  address     String    @default("")
+  status      String    @default("active") // active | done | paused
+  deadline    DateTime?
+  clientToken String    @unique // токен клиентского кабинета
+  locale      String    @default("") // ru | uk | "" → наследуется от настроек
+  createdAt   DateTime  @default(now())
+  acts        Act[]
+  estimates   Estimate[]
+  photos      Photo[]
+  stages      Stage[]
+}
+
+model Stage {
+  id        Int       @id @default(autoincrement())
+  objectId  Int
+  object    BuildObject @relation(fields: [objectId], references: [id], onDelete: Cascade)
+  order     Int
+  title     String
+  status    String    @default("todo") // done | current | next | todo
+  note      String    @default("")
+  doneAt    DateTime?
+  photos    Photo[]
+}
+
+// СМЕТА = предварительный документ (предложение заказчику).
+model Estimate {
+  id         Int       @id @default(autoincrement())
+  objectId   Int
+  object     BuildObject @relation(fields: [objectId], references: [id], onDelete: Cascade)
+  title      String
+  status     String    @default("draft") // draft | sent | approved | done
+  coeff      Float     @default(1)
+  note       String    @default("")
+  shareToken String?   @unique // прямая ссылка на смету в кабинете клиента
+  sentAt     DateTime?
+  approvedAt DateTime?
+  createdAt  DateTime  @default(now())
+  lines      EstimateLine[]
+  comments   Comment[]
+}
+
+model EstimateLine {
+  id          Int      @id @default(autoincrement())
+  estimateId  Int
+  estimate    Estimate @relation(fields: [estimateId], references: [id], onDelete: Cascade)
+  pos         Int
+  name        String
+  qty         Float
+  unit        String   @default("") // м² | м.п | шт | компл | ""
+  price       Float    @default(0)
+  hidden      Boolean  @default(false)
+  done        Boolean  @default(false)
+  doneQty     Float    @default(0) // сколько объёма уже включено в акты (защита от двойного включения)
+  section     String   @default("") // стены | потолки | доп — группировка в акте
+  note        String   @default("")
+  actLines    ActLine[]
+  photos      Photo[]
+}
+
+// АКТ = фактически выполненные работы за период (еженедельный).
+model Act {
+  id        Int      @id @default(autoincrement())
+  objectId  Int
+  object    BuildObject @relation(fields: [objectId], references: [id], onDelete: Cascade)
+  actNo     Int
+  date      DateTime @default(now())
+  periodFrom DateTime?
+  periodTo   DateTime?
+  note      String   @default("")
+  token     String   @unique // прямая ссылка на акт в кабинете клиента
+  lines     ActLine[]
+  payments  Payment[]
+  photos   Photo[]
+}
+
+model ActLine {
+  id             Int      @id @default(autoincrement())
+  actId          Int
+  act            Act      @relation(fields: [actId], references: [id], onDelete: Cascade)
+  estimateLineId Int?
+  estimateLine   EstimateLine? @relation(fields: [estimateLineId], references: [id], onDelete: SetNull)
+  pos            Int
+  name           String
+  qty            Float
+  unit           String   @default("")
+  price          Float
+  section        String   @default("") // стены | потолки | доп
+  note           String   @default("")
+}
+
+model Payment {
+  id     Int      @id @default(autoincrement())
+  actId  Int
+  act    Act      @relation(fields: [actId], references: [id], onDelete: Cascade)
+  amount Float
+  note   String   @default("")
+  at     DateTime @default(now())
+}
+
+// ФОТО: реальные файлы в db/uploads/ (path) + миниатюра (thumbPath),
+// привязка к объекту/этапу/акту/строке сметы (скрытые работы!), видимость клиенту.
+model Photo {
+  id             Int      @id @default(autoincrement())
+  objectId       Int
+  object         BuildObject @relation(fields: [objectId], references: [id], onDelete: Cascade)
+  actId          Int?
+  act            Act?     @relation(fields: [actId], references: [id], onDelete: SetNull)
+  stageId        Int?
+  stage          Stage?   @relation(fields: [stageId], references: [id], onDelete: SetNull)
+  estimateLineId Int?
+  estimateLine   EstimateLine? @relation(fields: [estimateLineId], references: [id], onDelete: SetNull)
+  kind           String   @default("progress") // progress | hidden | defect | material
+  storage        String   @default("svg") // file | svg (svg — legacy демо v1)
+  path           String   @default("") // имя файла в db/uploads/
+  thumbPath      String   @default("")
+  mime           String   @default("image/svg+xml")
+  size           Int      @default(0)
+  width          Int?
+  height         Int?
+  caption        String   @default("")
+  visible        Boolean  @default(true) // показывать клиенту
+  takenAt        DateTime? // дата, указанная мастером
+  createdAt      DateTime @default(now())
+}
+
+// Прайс-каталог: цена хранит источник и дату — защита от конфликта версий.
+model PriceItem {
+  id         Int      @id @default(autoincrement())
+  name       String   @unique
+  unit       String   @default("")
+  price      Float
+  category   String   @default("Прочее")
+  section    String   @default("стены") // стены | потолки | доп | подготовка
+  source     String   @default("cat") // cat | pdf-general | pdf-walls | est-parkoviy2 | custom | demo
+  sourceDate String   @default("")
+  note       String   @default("")
+  active     Boolean  @default(true)
+  updatedAt  DateTime @updatedAt
+}
+
+model Template {
+  id    Int    @id @default(autoincrement())
+  name  String @unique
+  lines String // JSON: [{name,qty,unit,price,hidden,section}]
+}
+
+model Comment {
+  id         Int       @id @default(autoincrement())
+  estimateId Int
+  estimate   Estimate  @relation(fields: [estimateId], references: [id], onDelete: Cascade)
+  author     String    // master | client
+  text       String
+  createdAt  DateTime  @default(now())
+}
